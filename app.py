@@ -4,92 +4,127 @@ import pandas as pd
 import re
 from io import BytesIO
 
-st.set_page_config(page_title="QCTO KM/KT Aligner", layout="wide")
+st.set_page_config(page_title="QCTO Alignment Tool Pro", layout="wide")
 
-st.title("📑 QCTO KM & KT Alignment Tool")
-st.write("This tool extracts KM/KT codes from your Curriculum and finds their page numbers in your Guides.")
+st.title("📑 Professional QCTO Alignment Tool")
+st.markdown("---")
 
-# --- STEP 1: UPLOAD DOCUMENTS ---
+# --- SIDEBAR SETTINGS ---
+with st.sidebar:
+    st.header("Matrix Settings")
+    page_format = st.selectbox(
+        "Page Number Format",
+        ["First Mention Only", "Condensed (e.g., 5, 8-10)", "All Mentions"]
+    )
+    st.info("Tip: Auditors usually prefer 'First Mention' or 'Condensed'.")
+
+def condense_pages(page_list):
+    """Helper to turn [5, 6, 7, 10] into '5-7, 10'"""
+    if not page_list: return ""
+    pages = sorted(list(set(page_list)))
+    if page_format == "First Mention Only":
+        return str(pages[0])
+    if page_format == "All Mentions":
+        return ", ".join(map(str, pages))
+    
+    # Condensed Logic
+    ranges = []
+    if not pages: return ""
+    start = pages[0]
+    for i in range(1, len(pages)):
+        if pages[i] != pages[i-1] + 1:
+            ranges.append(f"{start}-{pages[i-1]}" if start != pages[i-1] else f"{start}")
+            start = pages[i]
+    ranges.append(f"{start}-{pages[-1]}" if start != pages[-1] else f"{start}")
+    return ", ".join(ranges)
+
+# --- STEP 1: UPLOAD ---
 col1, col2 = st.columns(2)
-
 with col1:
-    st.subheader("1. Source Document")
-    curriculum_file = st.file_uploader("Upload QCTO Curriculum (PDF)", type="pdf")
-
+    st.subheader("1. Curriculum (Source)")
+    curr_file = st.file_uploader("Upload QCTO Curriculum PDF", type="pdf")
 with col2:
-    st.subheader("2. Target Documents")
-    material_files = st.file_uploader("Upload Learner/Facilitator Guides (PDFs)", type="pdf", accept_multiple_files=True)
+    st.subheader("2. Learning Material (Targets)")
+    guide_files = st.file_uploader("Upload LG/FG/Assessments", type="pdf", accept_multiple_files=True)
 
-# --- PROCESSING LOGIC ---
-if curriculum_file and material_files:
-    if st.button("Generate KM/KT Matrix"):
+if curr_file and guide_files:
+    if st.button("🚀 Generate Refined Alignment Matrix"):
         
-        # 1. Extract KM and KT codes from the Curriculum
-        # Regex explanation: KM-\d{2} finds KM-01, KT\d{2} finds KT01
-        # Combined: KM-\d{2}-KT\d{2} finds the full topic code
-        kt_pattern = r"KM-\d{2}-KT\d{2}"
+        # 1. SCAN CURRICULUM FOR KMs AND KTs
+        st.write("🔍 Extracting Modules and Topics from Curriculum...")
+        # Pattern to find KM-01 or KM-01-KT01
+        regex_pattern = r"(KM-\d{2}(?:-KT\d{2})?)"
         
-        st.info("🔍 Analyzing Curriculum for KM/KT codes...")
-        found_codes = []
-        
-        with pdfplumber.open(curriculum_file) as pdf:
+        topics_data = []
+        with pdfplumber.open(curr_file) as pdf:
             for page in pdf.pages:
                 text = page.extract_text()
                 if text:
-                    matches = re.findall(kt_pattern, text)
-                    found_codes.extend(matches)
-        
-        # Unique list of codes sorted
-        unique_codes = sorted(list(set(found_codes)))
-        
-        if not unique_codes:
-            st.error("No KM/KT codes found in the Curriculum PDF. Please check the format.")
-        else:
-            st.success(f"Found {len(unique_codes)} Knowledge Topics (KTs). Now scanning guides...")
+                    # Find codes and the text immediately following them (the title)
+                    lines = text.split('\n')
+                    for line in lines:
+                        match = re.search(regex_pattern, line)
+                        if match:
+                            code = match.group(0)
+                            # Try to clean up the rest of the line to use as a title
+                            title = line.replace(code, "").strip(": -")
+                            topics_data.append({"Code": code, "Title": title[:100]})
 
-            # 2. Search for these codes in the Learning Materials
-            results = []
-            
-            for uploaded_file in material_files:
-                with pdfplumber.open(uploaded_file) as pdf:
-                    for page_num, page in enumerate(pdf.pages, 1):
+        # Remove duplicates while keeping order
+        unique_topics = []
+        seen = set()
+        for t in topics_data:
+            if t["Code"] not in seen:
+                unique_topics.append(t)
+                seen.add(t["Code"])
+        
+        if not unique_topics:
+            st.error("Could not find any KM or KT codes. Please check document format.")
+        else:
+            st.success(f"Found {len(unique_topics)} items (KMs and KTs). Scanning guides...")
+
+            # 2. SCAN GUIDES FOR THOSE CODES
+            all_hits = []
+            for guide in guide_files:
+                with pdfplumber.open(guide) as pdf:
+                    for i, page in enumerate(pdf.pages, 1):
                         text = page.extract_text()
                         if text:
-                            for code in unique_codes:
-                                # We search for the code (e.g., KM-01-KT01) in the text
-                                if code in text:
-                                    results.append({
-                                        "KT Code": code,
-                                        "Module": code[:5], # Extracts 'KM-01'
-                                        "Document": uploaded_file.name,
-                                        "Page": page_num
+                            for item in unique_topics:
+                                if item["Code"] in text:
+                                    all_hits.append({
+                                        "Code": item["Code"],
+                                        "Title": item["Title"],
+                                        "Doc": guide.name,
+                                        "Page": i
                                     })
 
-            # 3. Process Results into Matrix
-            if results:
-                df = pd.DataFrame(results)
+            if not all_hits:
+                st.warning("No matches found in your guides. Ensure codes like 'KM-01-KT01' are written in the text.")
+            else:
+                # 3. GROUP AND FORMAT RESULTS
+                df_hits = pd.DataFrame(all_hits)
                 
-                # Group page numbers so they appear as "5, 12, 14" instead of separate rows
-                matrix = df.groupby(['KT Code', 'Module', 'Document'])['Page'].apply(
-                    lambda x: ', '.join(map(str, sorted(list(set(x)))))
-                ).unstack().reset_index()
+                # Group by Code, Title, and Doc to condense the pages
+                matrix = df_hits.groupby(['Code', 'Title', 'Doc'])['Page'].apply(condense_pages).unstack().reset_index()
+                
+                # Reorder so KMs and KTs are sorted naturally
+                matrix = matrix.sort_values(by="Code")
 
                 st.write("### Final Alignment Matrix")
                 st.dataframe(matrix, use_container_width=True)
 
-                # 4. Excel Download
+                # 4. EXPORT
                 output = BytesIO()
                 with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                    matrix.to_excel(writer, index=False, sheet_name='KM_KT_Alignment')
+                    matrix.to_excel(writer, index=False, sheet_name='Alignment')
                 
                 st.download_button(
-                    label="📥 Download Excel Alignment Matrix",
+                    "📥 Download Professional Matrix (Excel)",
                     data=output.getvalue(),
-                    file_name="QCTO_KM_KT_Matrix.xlsx",
+                    file_name="QCTO_Alignment_Matrix_Refined.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
-            else:
-                st.warning("Codes were found in the curriculum, but none were found in your Learning Materials. Ensure the codes are typed exactly (e.g., KM-01-KT01) in your Word/PDF guides.")
 
 else:
-    st.info("Awaiting files. Please upload your Curriculum and at least one Guide.")
+    st.info("Upload your files above to start.")
