@@ -11,31 +11,23 @@ st.markdown("---")
 
 # --- SIDEBAR SETTINGS ---
 with st.sidebar:
-    st.header("Matrix Settings")
+    st.header("Scanning Precision")
+    pages_to_skip = st.number_input("Skip first X pages (Table of Contents)", min_value=0, value=3)
+    ignore_margins = st.checkbox("Ignore Headers & Footers", value=True)
+    
+    st.header("Matrix Formatting")
     page_format = st.selectbox(
         "Page Number Format",
         ["First Mention Only", "Condensed (e.g., 5, 8-10)", "All Mentions"]
     )
-    st.info("Tip: Auditors usually prefer 'First Mention' or 'Condensed'.")
 
 def condense_pages(series):
-    """Helper to turn a pandas series of pages into a nice string like '5-7, 10'"""
-    if series.empty:
-        return ""
-    
-    # Convert to a sorted list of unique integers
+    if series.empty: return ""
     pages = sorted(list(set(series.dropna().astype(int).tolist())))
+    if not pages: return ""
+    if page_format == "First Mention Only": return str(pages[0])
+    if page_format == "All Mentions": return ", ".join(map(str, pages))
     
-    if not pages:
-        return ""
-
-    if page_format == "First Mention Only":
-        return str(pages[0])
-    
-    if page_format == "All Mentions":
-        return ", ".join(map(str, pages))
-    
-    # Condensed Logic (Standard)
     ranges = []
     start = pages[0]
     for i in range(1, len(pages)):
@@ -55,14 +47,13 @@ with col2:
     guide_files = st.file_uploader("Upload LG/FG/Assessments", type="pdf", accept_multiple_files=True)
 
 if curr_file and guide_files:
-    if st.button("🚀 Generate Refined Alignment Matrix"):
+    if st.button("🚀 Generate Clean Alignment Matrix"):
         
-        # 1. SCAN CURRICULUM FOR KMs AND KTs
-        st.write("🔍 Extracting Modules and Topics from Curriculum...")
-        # Pattern to find KM-01 or KM-01-KT01
+        # 1. SCAN CURRICULUM
+        st.write("🔍 Extracting codes from Curriculum...")
         regex_pattern = r"(KM-\d{2}(?:-KT\d{2})?)"
-        
         topics_data = []
+        
         with pdfplumber.open(curr_file) as pdf:
             for page in pdf.pages:
                 text = page.extract_text()
@@ -83,20 +74,37 @@ if curr_file and guide_files:
                 seen.add(t["Code"])
         
         if not unique_topics:
-            st.error("Could not find any KM or KT codes in the Curriculum. Please check the PDF format.")
+            st.error("No codes found in Curriculum.")
         else:
-            st.success(f"Found {len(unique_topics)} items. Scanning guides...")
+            st.success(f"Found {len(unique_topics)} topics. Scanning guides (skipping first {pages_to_skip} pages)...")
 
-            # 2. SCAN GUIDES FOR THOSE CODES
+            # 2. SCAN GUIDES
             all_hits = []
             for guide in guide_files:
                 with pdfplumber.open(guide) as pdf:
-                    for i, page in enumerate(pdf.pages, 1):
-                        text = page.extract_text()
+                    # Skip the Table of Contents pages
+                    pages_to_scan = pdf.pages[pages_to_skip:] 
+                    
+                    for i, page in enumerate(pages_to_scan, pages_to_skip + 1):
+                        
+                        # --- CROP HEADER/FOOTER ---
+                        if ignore_margins:
+                            # Only look at the middle 80% of the page
+                            height = float(page.height)
+                            width = float(page.width)
+                            # Crop: (x0, top, x1, bottom)
+                            bbox = (0, height * 0.1, width, height * 0.9)
+                            page_obj = page.within_bbox(bbox)
+                        else:
+                            page_obj = page
+                            
+                        text = page_obj.extract_text()
+                        
                         if text:
                             for item in unique_topics:
-                                # Look for the exact code in the text
-                                if item["Code"] in text:
+                                # Use regex for "Whole Word" matching to avoid partial hits
+                                pattern = r"\b" + re.escape(item["Code"]) + r"\b"
+                                if re.search(pattern, text):
                                     all_hits.append({
                                         "Code": item["Code"],
                                         "Title": item["Title"],
@@ -105,34 +113,21 @@ if curr_file and guide_files:
                                     })
 
             if not all_hits:
-                st.warning("No matches found in your guides. Ensure codes like 'KM-01-KT01' are written in the text of your documents.")
+                st.warning("No matches found. Try reducing the 'Pages to skip' or unchecking 'Ignore Headers'.")
             else:
-                # 3. GROUP AND FORMAT RESULTS
+                # 3. CONSTRUCT MATRIX
                 df_hits = pd.DataFrame(all_hits)
-                
-                # Apply the fixed condense_pages function
                 matrix = df_hits.groupby(['Code', 'Title', 'Doc'])['Page'].apply(condense_pages).unstack().reset_index()
-                
-                # Replace NaN with empty string for a cleaner look
-                matrix = matrix.fillna("")
-                
-                # Reorder so KMs and KTs are sorted naturally
-                matrix = matrix.sort_values(by="Code")
+                matrix = matrix.fillna("").sort_values(by="Code")
 
-                st.write("### Final Alignment Matrix")
+                st.write("### Cleaned Alignment Matrix")
                 st.dataframe(matrix, use_container_width=True)
 
-                # 4. EXPORT
                 output = BytesIO()
                 with pd.ExcelWriter(output, engine='openpyxl') as writer:
                     matrix.to_excel(writer, index=False, sheet_name='Alignment')
                 
-                st.download_button(
-                    "📥 Download Professional Matrix (Excel)",
-                    data=output.getvalue(),
-                    file_name="QCTO_Alignment_Matrix.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
+                st.download_button("📥 Download Excel", output.getvalue(), "QCTO_Matrix_Clean.xlsx")
 
 else:
-    st.info("Upload your files above to start.")
+    st.info("Upload documents to begin.")
