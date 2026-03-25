@@ -18,18 +18,25 @@ with st.sidebar:
     )
     st.info("Tip: Auditors usually prefer 'First Mention' or 'Condensed'.")
 
-def condense_pages(page_list):
-    """Helper to turn [5, 6, 7, 10] into '5-7, 10'"""
-    if not page_list: return ""
-    pages = sorted(list(set(page_list)))
+def condense_pages(series):
+    """Helper to turn a pandas series of pages into a nice string like '5-7, 10'"""
+    if series.empty:
+        return ""
+    
+    # Convert to a sorted list of unique integers
+    pages = sorted(list(set(series.dropna().astype(int).tolist())))
+    
+    if not pages:
+        return ""
+
     if page_format == "First Mention Only":
         return str(pages[0])
+    
     if page_format == "All Mentions":
         return ", ".join(map(str, pages))
     
-    # Condensed Logic
+    # Condensed Logic (Standard)
     ranges = []
-    if not pages: return ""
     start = pages[0]
     for i in range(1, len(pages)):
         if pages[i] != pages[i-1] + 1:
@@ -60,17 +67,14 @@ if curr_file and guide_files:
             for page in pdf.pages:
                 text = page.extract_text()
                 if text:
-                    # Find codes and the text immediately following them (the title)
                     lines = text.split('\n')
                     for line in lines:
                         match = re.search(regex_pattern, line)
                         if match:
                             code = match.group(0)
-                            # Try to clean up the rest of the line to use as a title
                             title = line.replace(code, "").strip(": -")
                             topics_data.append({"Code": code, "Title": title[:100]})
 
-        # Remove duplicates while keeping order
         unique_topics = []
         seen = set()
         for t in topics_data:
@@ -79,9 +83,9 @@ if curr_file and guide_files:
                 seen.add(t["Code"])
         
         if not unique_topics:
-            st.error("Could not find any KM or KT codes. Please check document format.")
+            st.error("Could not find any KM or KT codes in the Curriculum. Please check the PDF format.")
         else:
-            st.success(f"Found {len(unique_topics)} items (KMs and KTs). Scanning guides...")
+            st.success(f"Found {len(unique_topics)} items. Scanning guides...")
 
             # 2. SCAN GUIDES FOR THOSE CODES
             all_hits = []
@@ -91,6 +95,7 @@ if curr_file and guide_files:
                         text = page.extract_text()
                         if text:
                             for item in unique_topics:
+                                # Look for the exact code in the text
                                 if item["Code"] in text:
                                     all_hits.append({
                                         "Code": item["Code"],
@@ -100,13 +105,16 @@ if curr_file and guide_files:
                                     })
 
             if not all_hits:
-                st.warning("No matches found in your guides. Ensure codes like 'KM-01-KT01' are written in the text.")
+                st.warning("No matches found in your guides. Ensure codes like 'KM-01-KT01' are written in the text of your documents.")
             else:
                 # 3. GROUP AND FORMAT RESULTS
                 df_hits = pd.DataFrame(all_hits)
                 
-                # Group by Code, Title, and Doc to condense the pages
+                # Apply the fixed condense_pages function
                 matrix = df_hits.groupby(['Code', 'Title', 'Doc'])['Page'].apply(condense_pages).unstack().reset_index()
+                
+                # Replace NaN with empty string for a cleaner look
+                matrix = matrix.fillna("")
                 
                 # Reorder so KMs and KTs are sorted naturally
                 matrix = matrix.sort_values(by="Code")
@@ -122,7 +130,7 @@ if curr_file and guide_files:
                 st.download_button(
                     "📥 Download Professional Matrix (Excel)",
                     data=output.getvalue(),
-                    file_name="QCTO_Alignment_Matrix_Refined.xlsx",
+                    file_name="QCTO_Alignment_Matrix.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
 
