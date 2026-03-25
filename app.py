@@ -4,18 +4,21 @@ import pandas as pd
 import re
 from io import BytesIO
 
-st.set_page_config(page_title="QCTO Alignment Tool Pro", layout="wide")
+st.set_page_config(page_title="QCTO Aligner Pro V3", layout="wide")
 
 st.title("📑 Professional QCTO Alignment Tool")
-st.markdown("---")
+st.write("Fixed: Page Numbering Logic & Accuracy")
 
-# --- SIDEBAR SETTINGS ---
+# --- SIDEBAR ---
 with st.sidebar:
-    st.header("Scanning Precision")
-    pages_to_skip = st.number_input("Skip first X pages (Table of Contents)", min_value=0, value=3)
-    ignore_margins = st.checkbox("Ignore Headers & Footers", value=True)
+    st.header("Scanning Settings")
+    pages_to_skip = st.number_input("Skip first X pages (Covers/TOC)", min_value=0, value=3)
     
-    st.header("Matrix Formatting")
+    st.header("Precision Settings")
+    ignore_margins = st.checkbox("Ignore Headers & Footers", value=True)
+    margin_percent = st.slider("Header/Footer size (%)", 5, 25, 10)
+    
+    st.header("Formatting")
     page_format = st.selectbox(
         "Page Number Format",
         ["First Mention Only", "Condensed (e.g., 5, 8-10)", "All Mentions"]
@@ -40,17 +43,15 @@ def condense_pages(series):
 # --- STEP 1: UPLOAD ---
 col1, col2 = st.columns(2)
 with col1:
-    st.subheader("1. Curriculum (Source)")
-    curr_file = st.file_uploader("Upload QCTO Curriculum PDF", type="pdf")
+    curr_file = st.file_uploader("1. QCTO Curriculum (Source)", type="pdf")
 with col2:
-    st.subheader("2. Learning Material (Targets)")
-    guide_files = st.file_uploader("Upload LG/FG/Assessments", type="pdf", accept_multiple_files=True)
+    guide_files = st.file_uploader("2. Guides (Targets)", type="pdf", accept_multiple_files=True)
 
 if curr_file and guide_files:
-    if st.button("🚀 Generate Clean Alignment Matrix"):
+    if st.button("🚀 Run Alignment Scan"):
         
         # 1. SCAN CURRICULUM
-        st.write("🔍 Extracting codes from Curriculum...")
+        st.info("Reading Curriculum...")
         regex_pattern = r"(KM-\d{2}(?:-KT\d{2})?)"
         topics_data = []
         
@@ -58,8 +59,7 @@ if curr_file and guide_files:
             for page in pdf.pages:
                 text = page.extract_text()
                 if text:
-                    lines = text.split('\n')
-                    for line in lines:
+                    for line in text.split('\n'):
                         match = re.search(regex_pattern, line)
                         if match:
                             code = match.group(0)
@@ -74,27 +74,31 @@ if curr_file and guide_files:
                 seen.add(t["Code"])
         
         if not unique_topics:
-            st.error("No codes found in Curriculum.")
+            st.error("No KM/KT codes found in Curriculum.")
         else:
-            st.success(f"Found {len(unique_topics)} topics. Scanning guides (skipping first {pages_to_skip} pages)...")
+            st.success(f"Found {len(unique_topics)} unique topics.")
 
             # 2. SCAN GUIDES
             all_hits = []
-            for guide in guide_files:
+            progress_bar = st.progress(0)
+            
+            for g_idx, guide in enumerate(guide_files):
                 with pdfplumber.open(guide) as pdf:
-                    # Skip the Table of Contents pages
-                    pages_to_scan = pdf.pages[pages_to_skip:] 
+                    total_pages = len(pdf.pages)
                     
-                    for i, page in enumerate(pages_to_scan, pages_to_skip + 1):
+                    for page in pdf.pages:
+                        p_num = page.page_number # This is the REAL page number
                         
-                        # --- CROP HEADER/FOOTER ---
+                        # SKIP PAGES logic
+                        if p_num <= pages_to_skip:
+                            continue
+                        
+                        # CROP MARGINS logic
                         if ignore_margins:
-                            # Only look at the middle 80% of the page
-                            height = float(page.height)
-                            width = float(page.width)
-                            # Crop: (x0, top, x1, bottom)
-                            bbox = (0, height * 0.1, width, height * 0.9)
-                            page_obj = page.within_bbox(bbox)
+                            h, w = float(page.height), float(page.width)
+                            m = margin_percent / 100
+                            # Crop: left, top, right, bottom
+                            page_obj = page.crop((0, h * m, w, h * (1 - m)))
                         else:
                             page_obj = page
                             
@@ -102,32 +106,32 @@ if curr_file and guide_files:
                         
                         if text:
                             for item in unique_topics:
-                                # Use regex for "Whole Word" matching to avoid partial hits
-                                pattern = r"\b" + re.escape(item["Code"]) + r"\b"
-                                if re.search(pattern, text):
+                                # Use regex boundary \b to ensure exact matches
+                                if re.search(r"\b" + re.escape(item["Code"]) + r"\b", text):
                                     all_hits.append({
                                         "Code": item["Code"],
                                         "Title": item["Title"],
                                         "Doc": guide.name,
-                                        "Page": i
+                                        "Page": p_num
                                     })
+                progress_bar.progress((g_idx + 1) / len(guide_files))
 
+            # 3. CONSTRUCT OUTPUT
             if not all_hits:
-                st.warning("No matches found. Try reducing the 'Pages to skip' or unchecking 'Ignore Headers'.")
+                st.warning("No matches found in your guides. Check if codes are inside headers/footers.")
             else:
-                # 3. CONSTRUCT MATRIX
                 df_hits = pd.DataFrame(all_hits)
                 matrix = df_hits.groupby(['Code', 'Title', 'Doc'])['Page'].apply(condense_pages).unstack().reset_index()
                 matrix = matrix.fillna("").sort_values(by="Code")
 
-                st.write("### Cleaned Alignment Matrix")
+                st.write("### Final Alignment Results")
                 st.dataframe(matrix, use_container_width=True)
 
                 output = BytesIO()
                 with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                    matrix.to_excel(writer, index=False, sheet_name='Alignment')
+                    matrix.to_excel(writer, index=False, sheet_name='QCTO_Alignment')
                 
-                st.download_button("📥 Download Excel", output.getvalue(), "QCTO_Matrix_Clean.xlsx")
+                st.download_button("📥 Download Excel Matrix", output.getvalue(), "QCTO_Alignment.xlsx")
 
 else:
-    st.info("Upload documents to begin.")
+    st.info("Upload your Curriculum and Learning Materials to begin.")
