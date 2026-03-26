@@ -7,31 +7,39 @@ from io import BytesIO
 st.set_page_config(page_title="QCTO Auditor-Ready Aligner", layout="wide")
 
 st.title("📑 QCTO Accreditation Alignment Tool")
-st.write("Ensuring 100% accuracy for KM/KT Page Mapping.")
+st.write("Fixed: Data Processing Error & High-Resolution Scan.")
 
 # --- SIDEBAR: AUDIT SETTINGS ---
 with st.sidebar:
     st.header("Audit Requirements")
     page_mode = st.radio(
         "Page Numbering Style:",
-        ["Show All Pages (e.g. 4, 5, 6, 12)", "Condensed (e.g. 4-6, 12)", "Starting Page Only"],
+        ["Show All Pages", "Condensed (e.g. 4-6, 12)", "Starting Page Only"],
         index=1
     )
     st.markdown("---")
     st.header("Scan Precision")
-    skip_toc = st.number_input("Ignore first X pages (Table of Contents)", value=0)
-    use_margins = st.checkbox("Exclude Headers/Footers (Recommended)", value=False)
+    skip_toc = st.number_input("Ignore first X pages of Guide", value=0)
+    use_margins = st.checkbox("Exclude Headers/Footers", value=False)
 
-def format_pages(page_list):
-    if not page_list: return ""
-    pages = sorted(list(set(page_list)))
+def format_pages(series):
+    """Safe handling of page number lists to prevent ValueErrors"""
+    if series.empty:
+        return ""
+    
+    # Convert series to a unique, sorted list of integers
+    pages = sorted(list(set(series.dropna().astype(int).tolist())))
+    
+    if not pages:
+        return ""
     
     if page_mode == "Starting Page Only":
         return str(pages[0])
-    if page_mode == "Show All Pages (e.g. 4, 5, 6, 12)":
+    
+    if page_mode == "Show All Pages":
         return ", ".join(map(str, pages))
     
-    # Condensed Logic
+    # Condensed Logic (Standard Audit Format)
     ranges = []
     start = pages[0]
     for i in range(1, len(pages)):
@@ -52,9 +60,9 @@ if curr_file and guide_files:
     if st.button("🔍 Run High-Resolution Scan"):
         
         # --- 1. DEEP SCAN CURRICULUM ---
-        st.info("Step 1: Analyzing Curriculum for all KM and KT codes...")
-        # Broadened regex to catch variations: KM-01, KM-01-KT01, KM 01, etc.
-        regex_pattern = r"(KM\s?-\s?\d{2}(?:\s?-\s?KT\s?\d{2})?)"
+        st.info("Step 1: Extracting all Modules/Topics from Curriculum...")
+        # regex looks for KM-01 or KM-01-KT01 or KM01-KT01
+        regex_pattern = r"(KM\s?[-]?\s?\d{2}(?:\s?[-]?\s?KT\s?\d{2})?)"
         
         detected_items = []
         with pdfplumber.open(curr_file) as pdf:
@@ -64,32 +72,35 @@ if curr_file and guide_files:
                     for line in text.split('\n'):
                         match = re.search(regex_pattern, line)
                         if match:
-                            code = match.group(0).replace(" ", "") # Standardize to KM-01-KT01
-                            title = line.replace(match.group(0), "").strip(": -–—")
-                            detected_items.append({"Code": code, "Title": title[:100]})
+                            raw_code = match.group(0)
+                            # Clean code to standard format: KM-01-KT01
+                            clean_code = re.sub(r'\s+', '', raw_code)
+                            if "-" not in clean_code: # Add dashes if missing
+                                clean_code = clean_code[:2] + "-" + clean_code[2:]
+                            
+                            title = line.replace(raw_code, "").strip(": -–—")
+                            detected_items.append({"Code": clean_code, "Title": title[:100]})
 
-        # Unique Topics List
         df_topics = pd.DataFrame(detected_items).drop_duplicates(subset=['Code'])
         
         if df_topics.empty:
-            st.error("No KM or KT codes detected. Please ensure the Curriculum PDF is not a scanned image.")
+            st.error("No KM/KT codes detected in Curriculum. Check if the PDF is searchable.")
         else:
-            st.success(f"Successfully identified {len(df_topics)} Modules/Topics from Curriculum.")
-            with st.expander("View Detected Topics List"):
+            st.success(f"Identified {len(df_topics)} unique topics in Curriculum.")
+            with st.expander("List of topics found in Curriculum (Verify this list)"):
                 st.table(df_topics)
 
             # --- 2. SCAN GUIDES ---
-            st.info("Step 2: Searching Learning Material for matches...")
+            st.info("Step 2: Searching your Guides for these topics...")
             results = []
             
             for guide in guide_files:
                 with pdfplumber.open(guide) as pdf:
                     for page in pdf.pages:
                         p_num = page.page_number
-                        
                         if p_num <= skip_toc: continue
                         
-                        # Apply margin cropping if selected
+                        # Margin cropping
                         if use_margins:
                             h, w = float(page.height), float(page.width)
                             page_obj = page.crop((0, h*0.1, w, h*0.9))
@@ -98,10 +109,13 @@ if curr_file and guide_files:
                             
                         text = page_obj.extract_text()
                         if text:
+                            # Standardize text for searching (remove spaces in codes)
+                            # This helps find "KM - 01" even if we search for "KM-01"
+                            clean_text = re.sub(r'(KM|KT)\s*-\s*', r'\1-', text)
+                            
                             for _, row in df_topics.iterrows():
                                 code = row['Code']
-                                # Search for code. Regex \b ensures we don't get partial matches.
-                                if re.search(r"\b" + re.escape(code) + r"\b", text):
+                                if code in clean_text:
                                     results.append({
                                         "Code": code,
                                         "Topic Title": row['Title'],
@@ -111,24 +125,23 @@ if curr_file and guide_files:
 
             # --- 3. GENERATE MATRIX ---
             if not results:
-                st.warning("No matches found in your guides. Ensure the KM/KT codes are typed exactly as they appear in the Curriculum.")
+                st.warning("No matches found in your guides. Ensure the KM/KT codes are physically typed in your Learner Guide.")
             else:
                 df_results = pd.DataFrame(results)
                 
-                # Pivot and Format
+                # Apply the safe format_pages function
                 matrix = df_results.groupby(['Code', 'Topic Title', 'Document'])['Page'].apply(format_pages).unstack().reset_index()
-                matrix = matrix.fillna("Not Found")
+                matrix = matrix.fillna("NOT FOUND")
                 
                 st.subheader("Final QCTO Alignment Matrix")
                 st.dataframe(matrix, use_container_width=True)
 
-                # Excel Export
                 output = BytesIO()
                 with pd.ExcelWriter(output, engine='openpyxl') as writer:
                     matrix.to_excel(writer, index=False, sheet_name='QCTO_Alignment')
                 
                 st.download_button(
-                    label="📥 Download Excel for QCTO Submission",
+                    label="📥 Download Excel Matrix",
                     data=output.getvalue(),
                     file_name="QCTO_Alignment_Matrix.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
