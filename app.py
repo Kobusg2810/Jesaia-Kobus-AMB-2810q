@@ -4,120 +4,124 @@ import pandas as pd
 import re
 from io import BytesIO
 
-st.set_page_config(page_title="QCTO Final Alignment Tool", layout="wide")
+st.set_page_config(page_title="QCTO Alignment Tool V9", layout="wide")
 
-st.title("📑 QCTO Accreditation Alignment Tool (V8)")
-st.write("Optimized for KT detection and direct Copy/Paste.")
+st.title("📑 QCTO Alignment Tool (V9)")
+st.write("Fixed: Sub-topic (KT) detection and Page Number formatting.")
 
 # --- CORE FUNCTIONS ---
-def normalize_code(text):
-    """Standardizes codes to KM-01-KT01 format for reliable matching"""
-    if not text: return ""
-    # Remove all spaces/dots/dashes and re-insert standard dashes
-    clean = re.sub(r'[^A-Z0-9]', '', text.upper())
-    if "KT" in clean:
-        # Format KM01KT01 -> KM-01-KT01
-        return f"{clean[:2]}-{clean[2:4]}-{clean[4:6]}-{clean[6:]}" if len(clean) > 8 else clean
-    return clean
-
 def get_condensed_pages(page_list, mode):
+    """Returns a clean string of page numbers, preventing bullet points."""
     if not page_list: return "-"
     pages = sorted(list(set([int(p) for p in page_list])))
-    if not pages: return "-"
-    if mode == "Starting Page Only": return str(pages[0])
-    if mode == "Show All": return ", ".join(map(str, pages))
     
-    # Condensed (4-6, 12)
+    if mode == "Starting Page Only":
+        return str(pages[0])
+    
+    if mode == "Show All":
+        return ", ".join(map(str, pages))
+    
+    # Condensed Logic (e.g., 4-6, 12)
     ranges = []
+    if not pages: return "-"
     start = pages[0]
     for i in range(1, len(pages)):
         if pages[i] != pages[i-1] + 1:
             ranges.append(f"{start}-{pages[i-1]}" if start != pages[i-1] else f"{start}")
             start = pages[i]
     ranges.append(f"{start}-{pages[-1]}" if start != pages[-1] else f"{start}")
-    return ", ".join(ranges)
+    return str(", ".join(ranges)) # Force string return
 
 # --- SIDEBAR ---
 with st.sidebar:
-    st.header("1. Audit Requirements")
-    page_mode = st.radio("Page Numbering:", ["Condensed (4-6, 12)", "Show All", "Starting Page Only"])
-    st.header("2. Search Precision")
-    skip_toc_guide = st.number_input("Skip X pages in Guide (TOC/Covers)", value=0)
-    st.info("Tip: If you see topics appearing on page 1-3 incorrectly, increase this number.")
+    st.header("1. Display Settings")
+    page_mode = st.radio("Page Format:", ["Condensed (4-6, 12)", "Show All", "Starting Page Only"])
+    st.header("2. Accuracy Settings")
+    skip_pages = st.number_input("Skip first X pages of Guide", value=0)
+    st.info("Increase this if topics appear on the Cover/TOC incorrectly.")
 
 # --- UPLOAD ---
 col1, col2 = st.columns(2)
 with col1:
     curr_file = st.file_uploader("Upload QCTO Curriculum", type="pdf")
 with col2:
-    guide_files = st.file_uploader("Upload Learner/Facilitator Guides", type="pdf", accept_multiple_files=True)
+    guide_files = st.file_uploader("Upload Guides (LG/FG)", type="pdf", accept_multiple_files=True)
 
 if curr_file and guide_files:
     if st.button("🚀 GENERATE ALIGNMENT MATRIX"):
         
-        # 1. SCAN CURRICULUM (Priority on KT)
-        st.info("Scanning Curriculum for KM and KT codes...")
-        # Regex looks for the longest pattern (KM-01-KT01) first, then KM-01
-        regex_pattern = r"(KM-\d{2}-KT\d{2}|KM\d{2}KT\d{2}|KM-\d{2}|KM\d{2})"
+        # 1. SCAN CURRICULUM (Smart KT Detection)
+        st.info("Step 1: Extracting KMs and KTs from Curriculum...")
         
-        curriculum_list = []
+        # This regex looks for KM and KT even if they are just 'KM 1' or 'KT 1'
+        km_pattern = r"KM\s*[-]?\s*(\d{2})"
+        kt_pattern = r"KT\s*[-]?\s*(\d{2})"
+        
+        curriculum_data = []
+        current_km = "01" # Default starting KM
+        
         with pdfplumber.open(curr_file) as pdf:
-            # We skip the first 2 pages of Curriculum often to avoid the general TOC
-            for page in pdf.pages[1:]: 
+            for page in pdf.pages:
                 text = page.extract_text()
                 if text:
                     for line in text.split('\n'):
-                        matches = re.findall(regex_pattern, line, re.IGNORECASE)
-                        for m in matches:
-                            clean = m.strip().upper().replace(" ", "")
-                            title = line.replace(m, "").strip(": -–—.")
-                            curriculum_list.append({"Code": clean, "Title": title[:100]})
+                        # Detect KM change
+                        km_match = re.search(km_pattern, line, re.IGNORECASE)
+                        if km_match:
+                            current_km = km_match.group(1)
+                            full_km_code = f"KM-{current_km}"
+                            title = line.replace(km_match.group(0), "").strip(": -–—.")
+                            curriculum_data.append({"Code": full_km_code, "Title": title[:100]})
+                        
+                        # Detect KT
+                        kt_match = re.search(kt_pattern, line, re.IGNORECASE)
+                        if kt_match:
+                            kt_num = kt_match.group(1)
+                            full_kt_code = f"KM-{current_km}-KT-{kt_num}"
+                            title = line.replace(kt_match.group(0), "").strip(": -–—.")
+                            curriculum_data.append({"Code": full_kt_code, "Title": title[:100]})
 
-        df_curr = pd.DataFrame(curriculum_list).drop_duplicates(subset=['Code'])
-        # Sort so KT follows KM
-        df_curr = df_curr.sort_values(by="Code", ascending=True)
+        df_curr = pd.DataFrame(curriculum_data).drop_duplicates(subset=['Code'])
 
         if df_curr.empty:
-            st.error("No codes found. Is the Curriculum PDF searchable text?")
+            st.error("No topics found. Please ensure the Curriculum PDF contains searchable text.")
         else:
-            st.success(f"Found {len(df_curr)} KM/KT Topics.")
+            st.success(f"Successfully identified {len(df_curr)} Topics (KMs & KTs). Scanning guides...")
 
             # 2. SCAN GUIDES
             raw_hits = []
             for guide in guide_files:
                 with pdfplumber.open(guide) as pdf:
-                    # Physical page count start
                     for i, page in enumerate(pdf.pages):
-                        current_p = i + 1
-                        if current_p <= skip_toc_guide: continue
+                        page_num = i + 1
+                        if page_num <= skip_pages: continue
                         
                         text = page.extract_text()
                         if text:
-                            # Standardize text for searching
-                            text_to_search = text.upper().replace(" ", "")
+                            search_text = text.upper().replace(" ", "").replace("-", "")
                             for _, row in df_curr.iterrows():
-                                search_code = row['Code'].replace("-", "")
-                                if search_code in text_to_search:
-                                    raw_hits.append({
-                                        "Code": row['Code'],
-                                        "Doc": guide.name,
-                                        "Page": current_p
-                                    })
+                                # Create a 'fuzzy' version of the code to find in guide
+                                # e.g. KM-01-KT-01 becomes KM01KT01
+                                search_key = row['Code'].replace("-", "")
+                                if search_key in search_text:
+                                    raw_hits.append({"Code": row['Code'], "Doc": guide.name, "Page": page_num})
 
-            # 3. OUTPUT TABLE
-            matrix_data = []
+            # 3. BUILD THE TABLE
+            final_rows = []
             for _, topic in df_curr.iterrows():
-                entry = {"Code": topic['Code'], "Description": topic['Title']}
+                entry = {"KM/KT Code": topic['Code'], "Topic Description": topic['Title']}
                 for doc in guide_files:
-                    pages = [h['Page'] for h in raw_hits if h['Code'] == topic['Code'] and h['Doc'] == doc.name]
-                    entry[doc.name] = get_condensed_pages(pages, page_mode)
-                matrix_data.append(entry)
+                    # Collect pages
+                    found_pages = [h['Page'] for h in raw_hits if h['Code'] == topic['Code'] and h['Doc'] == doc.name]
+                    # Format as clean string (prevents bullet points)
+                    entry[doc.name] = str(get_condensed_pages(found_pages, page_mode))
+                final_rows.append(entry)
 
-            final_df = pd.DataFrame(matrix_data)
-            
-            st.subheader("Final Alignment Matrix")
-            st.write("💡 *You can now highlight and copy the table below directly.*")
-            # Using st.table for direct copy-paste support
+            final_df = pd.DataFrame(final_rows)
+
+            # Display as a clean, copyable table
+            st.subheader("Final QCTO Alignment Matrix")
+            st.markdown("Highlight the table below to copy/paste into Word.")
             st.table(final_df)
 
             # Excel Download
@@ -125,4 +129,5 @@ if curr_file and guide_files:
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
                 final_df.to_excel(writer, index=False)
             st.download_button("📥 Download Excel Version", output.getvalue(), "QCTO_Alignment.xlsx")
-else:st.info("Awaiting documents...")
+else:
+    st.info("Awaiting Documents...")
