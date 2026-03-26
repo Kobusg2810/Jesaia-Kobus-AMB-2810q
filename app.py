@@ -7,27 +7,25 @@ from io import BytesIO
 st.set_page_config(page_title="QCTO Auditor-Ready Aligner", layout="wide")
 
 st.title("📑 QCTO Accreditation Alignment Tool")
-st.write("V6: High-Precision Scan & Data Stability Fix")
+st.write("V7: Format-Agnostic Search (Ignores spaces, dashes, and dots)")
 
-# --- FUNCTIONS ---
+# --- CORE FUNCTIONS ---
+def clean_for_search(text):
+    """Removes all non-alphanumeric characters and converts to uppercase"""
+    if not text: return ""
+    return re.sub(r'[^A-Z0-9]', '', text.upper())
+
 def get_condensed_pages(page_list, mode):
-    """Accurate page number formatting without Pandas ambiguity"""
-    if not page_list:
-        return "NOT FOUND"
-    
-    # Clean and sort unique page numbers
-    pages = sorted(list(set([int(p) for p in page_list if p is not None])))
-    
-    if not pages:
-        return "NOT FOUND"
+    if not page_list: return "NOT FOUND"
+    pages = sorted(list(set([int(p) for p in page_list])))
+    if not pages: return "NOT FOUND"
     
     if mode == "Starting Page Only":
         return str(pages[0])
-    
     if mode == "Show All Pages":
         return ", ".join(map(str, pages))
     
-    # Condensed Logic (Standard Audit Format: 4-6, 12)
+    # Condensed Logic
     ranges = []
     start = pages[0]
     for i in range(1, len(pages)):
@@ -46,8 +44,8 @@ with st.sidebar:
         index=1
     )
     st.markdown("---")
-    skip_toc = st.number_input("Ignore first X pages of Guide (TOC)", value=0)
-    use_margins = st.checkbox("Strict Scan (Ignore Headers/Footers)", value=False)
+    skip_toc = st.number_input("Ignore first X pages of Guide", value=0)
+    st.info("Set this to 0 first to ensure nothing is missed.")
 
 # --- MAIN INTERFACE ---
 col1, col2 = st.columns(2)
@@ -57,41 +55,45 @@ with col2:
     guide_files = st.file_uploader("2. Learner/Facilitator Guides (Target PDFs)", type="pdf", accept_multiple_files=True)
 
 if curr_file and guide_files:
-    if st.button("🔍 START HIGH-RESOLUTION ALIGNMENT"):
+    if st.button("🔍 START ACCREDITATION SCAN"):
         
-        # 1. SCAN CURRICULUM FOR ALL KM/KT CODES
-        st.info("Scanning Curriculum for all required topics...")
-        # Broad regex to catch KM-01, KM-01-KT01, KM 01, KM01-KT01 etc.
-        regex_pattern = r"(KM\s?[-]?\s?\d{2}(?:\s?[-]?\s?KT\s?\d{2})?)"
+        # 1. SCAN CURRICULUM
+        st.info("Step 1: Extracting KM/KT codes from Curriculum...")
+        # Catch anything that looks like KM...KT...
+        regex_pattern = r"(KM\s?[-.]?\s?\d{2,}(?:\s?[-.]?\s?KT\s?\d{2,})?)"
         
         curriculum_topics = []
         with pdfplumber.open(curr_file) as pdf:
             for page in pdf.pages:
-                content = page.extract_text()
-                if content:
-                    for line in content.split('\n'):
+                text = page.extract_text()
+                if text:
+                    for line in text.split('\n'):
                         match = re.search(regex_pattern, line, re.IGNORECASE)
                         if match:
                             raw_code = match.group(0)
-                            # Standardize to KM-01-KT01
-                            clean_code = re.sub(r'\s+', '', raw_code).upper()
-                            if "-" not in clean_code:
-                                clean_code = clean_code[:2] + "-" + clean_code[2:]
+                            # Display version (clean looking)
+                            display_code = raw_code.strip().upper()
+                            # Search version (no symbols)
+                            search_key = clean_for_search(raw_code)
                             
-                            title = line.replace(raw_code, "").strip(": -–—")
-                            curriculum_topics.append({"Code": clean_code, "Title": title[:100]})
+                            title = line.replace(raw_code, "").strip(": -–—.")
+                            curriculum_topics.append({
+                                "SearchKey": search_key, 
+                                "DisplayCode": display_code, 
+                                "Title": title[:100]
+                            })
 
-        df_curr = pd.DataFrame(curriculum_topics).drop_duplicates(subset=['Code'])
+        df_curr = pd.DataFrame(curriculum_topics).drop_duplicates(subset=['SearchKey'])
         
         if df_curr.empty:
-            st.error("No KM or KT codes found in the Curriculum. Please check if the PDF is searchable.")
+            st.error("No KM or KT codes detected in Curriculum. Please check the PDF format.")
         else:
-            st.success(f"Found {len(df_curr)} Topics/Modules in Curriculum.")
-            with st.expander("Verify Identified Topics"):
-                st.table(df_curr)
+            st.success(f"Found {len(df_curr)} Topics in Curriculum.")
+            with st.expander("Verify Identified Topics List"):
+                st.table(df_curr[['DisplayCode', 'Title']])
 
             # 2. SCAN GUIDES
-            st.info("Scanning Guides for matches... please wait.")
+            st.info("Step 2: Scanning Guides for matches...")
             raw_hits = []
             
             for guide in guide_files:
@@ -100,49 +102,42 @@ if curr_file and guide_files:
                         p_num = page.page_number
                         if p_num <= skip_toc: continue
                         
-                        if use_margins:
-                            h, w = float(page.height), float(page.width)
-                            page_obj = page.crop((0, h*0.1, w, h*0.9))
-                        else:
-                            page_obj = page
-                            
-                        text = page_obj.extract_text()
+                        text = page.extract_text()
                         if text:
-                            # Clean text to find codes even with weird spacing
-                            clean_text = re.sub(r'\s+', '', text).upper()
+                            # Create a 'searchable fingerprint' of the entire page
+                            page_fingerprint = clean_for_search(text)
                             
                             for _, row in df_curr.iterrows():
-                                code_to_find = row['Code'].replace("-", "")
-                                if code_to_find in clean_text:
+                                if row['SearchKey'] in page_fingerprint:
                                     raw_hits.append({
-                                        "Code": row['Code'],
+                                        "SearchKey": row['SearchKey'],
+                                        "DisplayCode": row['DisplayCode'],
                                         "Title": row['Title'],
                                         "Doc": guide.name,
                                         "Page": p_num
                                     })
 
-            # 3. BUILD MATRIX WITHOUT PANDAS GROUPBY ERRORS
+            # 3. BUILD MATRIX
             if not raw_hits:
-                st.warning("No matches found in your guides. Ensure KM/KT codes are typed inside the guides.")
+                st.warning("No matches found in your guides. Ensure the KM/KT codes are written in the text of your documents.")
             else:
-                # Convert list of hits to a table
-                df_results = pd.DataFrame(raw_hits)
-                
-                # Create the final alignment rows
-                matrix_rows = []
-                for code in df_curr['Code'].tolist():
-                    title = df_curr[df_curr['Code'] == code]['Title'].iloc[0]
-                    row_entry = {"KM/KT Code": code, "Topic Description": title}
+                matrix_data = []
+                for _, topic in df_curr.iterrows():
+                    entry = {
+                        "KM/KT Code": topic['DisplayCode'],
+                        "Topic Description": topic['Title']
+                    }
                     
-                    for doc_name in [g.name for g in guide_files]:
-                        # Get pages for this specific code and this specific document
-                        matching_pages = df_results[(df_results['Code'] == code) & (df_results['Doc'] == doc_name)]['Page'].tolist()
-                        row_entry[doc_name] = get_condensed_pages(matching_pages, page_mode)
+                    for doc in guide_files:
+                        matching_pages = [
+                            h['Page'] for h in raw_hits 
+                            if h['SearchKey'] == topic['SearchKey'] and h['Doc'] == doc.name
+                        ]
+                        entry[doc.name] = get_condensed_pages(matching_pages, page_mode)
                     
-                    matrix_rows.append(row_entry)
+                    matrix_data.append(entry)
 
-                final_df = pd.DataFrame(matrix_rows)
-
+                final_df = pd.DataFrame(matrix_data)
                 st.subheader("Final QCTO Alignment Matrix")
                 st.dataframe(final_df, use_container_width=True)
 
@@ -157,3 +152,5 @@ if curr_file and guide_files:
                     file_name="QCTO_Alignment_Matrix.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
+else:
+    st.info("Upload your Curriculum and Guides to begin.")
